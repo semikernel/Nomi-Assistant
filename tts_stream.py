@@ -6,11 +6,9 @@ from queue import Empty
 import time
 from dotenv import load_dotenv
 from openai import OpenAI
-from io import BytesIO
-from pydub import AudioSegment
-from pydub.utils import make_chunks
 import warnings
 import requests
+import re
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 os.environ['PYTHONWARNINGS'] = 'ignore'
@@ -23,7 +21,7 @@ class TTSManager:
         self.current_stream = None
         
         # 修复音频设备初始化
-        self.pyaudio_instance = pyaudio.PyAudio()  # 移除非法的参数
+        self.pyaudio_instance = pyaudio.PyAudio()  
         self.audio_format = pyaudio.paInt16
         self.channels = 1
         self.sample_rate = 24000
@@ -34,42 +32,26 @@ class TTSManager:
             base_url="https://api.siliconflow.cn/v1",
             timeout=30  # 增加超时设置
         )
-
     def _play_stream(self, audio_generator):
-        # 修复音频流配置
         try:
             stream = self.pyaudio_instance.open(
                 format=self.audio_format,
                 channels=self.channels,
                 rate=self.sample_rate,
                 output=True,
-                frames_per_buffer=self.chunk_size,
+                frames_per_buffer=self.chunk_size,  # 增加缓冲区大小
                 start=False,
                 output_device_index=self.pyaudio_instance.get_default_output_device_info()["index"]
             )
             stream.start_stream()
 
-            for mp3_data in audio_generator:
+            # 直接遍历 PCM 数据块生成器
+            for pcm_chunk in audio_generator:
                 if self.stop_event.is_set():
                     break
-                
-                # 增强解码稳定性
-                try:
-                    audio_buffer = BytesIO(mp3_data)
-                    audio = AudioSegment.from_file(audio_buffer, format="mp3")
-                    audio = audio.set_frame_rate(self.sample_rate)
-                    audio = audio.set_channels(self.channels)
-                    pcm_data = audio.raw_data
-                except Exception as e:
-                    logger.warning(f"音频解码失败: {str(e)}")
-                    continue
 
-                # 分块写入优化
-                pos = 0
-                while pos < len(pcm_data) and not self.stop_event.is_set():
-                    end_pos = pos + self.chunk_size * 2  # 16bit=2bytes
-                    stream.write(pcm_data[pos:end_pos])
-                    pos = end_pos
+                # 🔥 直接写入 PCM 数据（无需格式转换）
+                stream.write(pcm_chunk)  
 
         except OSError as e:
             logger.error(f"音频设备错误: {str(e)}")
@@ -77,10 +59,22 @@ class TTSManager:
             if stream.is_active():
                 stream.stop_stream()
             stream.close()
-    
+            self.current_stream = None
+    def add_endofprompt(self, text):
+        """
+        在非空格标点符号后添加 <|endofprompt|>
+        这个是用来给tts增加一些自然语气的，比如开心，难过，低语等，暂时不考虑
+        """
+        # 转义特殊字符（如 .），使用原始字符串确保转义正确
+        pattern = r'([!?。\.,;:~！])'  # 对 . 进行转义 → \.
+        return re.sub(pattern, r'\1<|endofprompt|> ', text)
     def stop_tts(self):
         logger.debug('Stopping TTS')
         self.stop_event.set()
+        if self.current_stream:
+            self.current_stream.stop_stream()
+            self.current_stream.close()
+        self.pyaudio_instance.terminate()
         self.stop_event.clear()
 
     def start_tts(self):
@@ -93,7 +87,7 @@ class TTSManager:
             text_chunks = []
             while True:
                 try:
-                    chunk = self.response_queue.get(timeout=5)
+                    chunk = self.response_queue.get(timeout=1)
                     if chunk == "[END]":
                         break
                     text_chunks.append(chunk)
@@ -104,21 +98,24 @@ class TTSManager:
             if not full_text.strip():
                 continue
 
-            # 修复API调用参数
+            # processed_text = self.add_endofprompt(full_text)
+
+            # 添加指令前缀（根据API要求）
+            # formatted_text = f"默认指令 <|endofprompt|> {processed_text}"
+
+
             try:
                 with self.client.audio.speech.with_streaming_response.create(
                     model="FunAudioLLM/CosyVoice2-0.5B",
                     voice="speech:nomi:520j5ipxv4:tqpcoclegrdtuezsqprl",
                     input=full_text,
-                    response_format="mp3",
-                    # 移除无效的sample_rate参数
+                    response_format="pcm",
                     speed=1.0,  # 添加有效参数
-                    # stream=True
                 ) as response:
                     
                     def audio_generator():
                         try:
-                            for chunk in response.iter_bytes(chunk_size=4096):
+                            for chunk in response.iter_bytes(chunk_size=1024 * 2):
                                 if self.stop_event.is_set():
                                     break
                                 yield chunk
@@ -138,20 +135,11 @@ class TTSManager:
                 time.sleep(1)  # 错误冷却时间
 
 if __name__ == "__main__":
-    # 测试时添加设备选择提示
     import queue
     q = queue.Queue()
     tts = TTSManager(q)
-    
-    # 显示可用音频设备
-    print("可用音频设备：")
-    for i in range(tts.pyaudio_instance.get_device_count()):
-        dev = tts.pyaudio_instance.get_device_info_by_index(i)
-        if dev["maxOutputChannels"] > 0:
-            print(f"{dev['index']}: {dev['name']}")
-
-    # 测试数据
-    q.put("但是为什么我的声音很卡呢？")
+   
+    q.put("你好呀！我很高兴和你交流~如果你有什么问题，随时告诉我哦。我在这里，准备为你提供帮助！希望能为你的每一天带来一些便利和乐趣。如果你需要了解任何信息，或者只是想聊聊天，我都在呢！")
     q.put("[END]")
     
     tts_thread = threading.Thread(target=tts.start_tts)
