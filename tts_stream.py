@@ -2,16 +2,13 @@ import os
 import threading
 import pyaudio
 from loguru import logger
-from queue import Empty
+from queue import Empty, Queue
 import time
 from dotenv import load_dotenv
 from openai import OpenAI
-import warnings
 import requests
 import re
 
-warnings.filterwarnings("ignore", category=DeprecationWarning)
-os.environ['PYTHONWARNINGS'] = 'ignore'
 load_dotenv()
 
 class TTSManager:
@@ -26,7 +23,7 @@ class TTSManager:
         self.audio_format = pyaudio.paInt16
         self.channels = 1
         self.sample_rate = 24000
-        self.chunk_size = 1024        
+        self.chunk_size = 1024   #1024 -- 1000 -- 500 -- 250 --- 100        
 
         # 修复API客户端初始化
         self.client = OpenAI(
@@ -66,11 +63,12 @@ class TTSManager:
 
         except OSError as e:
             logger.error(f"音频设备错误: {str(e)}")
-        finally:
-            if stream.is_active():
-                stream.stop_stream()
-            stream.close()
-            self.current_stream = None
+        # 注释掉是因为这里可能产生了卡顿
+        # finally:
+        #     if stream.is_active():
+        #         stream.stop_stream()
+        #     stream.close()
+        #     self.current_stream = None 
     def add_endofprompt(self, text):
         """
         在非空格标点符号后添加 <|endofprompt|>
@@ -98,6 +96,12 @@ class TTSManager:
                     time.sleep(0.1)
                     continue
                 text = self.response_queue.get(timeout=0.1)  # 缩短超时时间
+                # while True:
+                #     try:
+                #         text = self.response_queue.get(timeout=0.1)
+                #         full_text = "".join(text)
+                #     except queue.Empty:
+                #         break  # 队列已空，退出循环
                 if text == "[END]" or not text.strip():
                     continue
 
@@ -128,6 +132,7 @@ class TTSManager:
                 with self.client.audio.speech.with_streaming_response.create(
                     model="FunAudioLLM/CosyVoice2-0.5B",
                     voice="speech:nomi:520j5ipxv4:tqpcoclegrdtuezsqprl",
+                    # voice="FunAudioLLM/CosyVoice2-0.5B:diana", # 系统预置音色
                     input=text,
                     response_format="pcm",
                     speed=1.0,  # 添加有效参数
@@ -137,7 +142,7 @@ class TTSManager:
                         def audio_generator():
                             try:
                                 # 从响应中获取音频数据，每次获取1024*2字节
-                                for chunk in response.iter_bytes(chunk_size=1024 * 2):
+                                for chunk in response.iter_bytes(chunk_size= self.chunk_size * 2):
                                     # 如果停止事件被设置，则停止生成数据
                                     if self.stop_event.is_set():
                                         break
@@ -158,7 +163,7 @@ class TTSManager:
                         # 等待线程结束
                         play_thread.join()
             except Empty:
-                time.sleep(0.05)  # 更细粒度的休眠减少延迟
+                time.sleep(0.1)  # 更细粒度的休眠减少延迟
             except Exception as e:
                 # 如果发生其他异常，则记录错误日志，并等待1秒
                 logger.error(f"TTS请求失败: {str(e)}")
@@ -169,8 +174,7 @@ if __name__ == "__main__":
     q = queue.Queue()
     tts = TTSManager(q)
    
-    q.put("你好呀！我很高兴和你交流~如果你有什么问题，随时告诉我哦。我在这里，准备为你提供帮助！希望能为你的每一天带来一些便利和乐趣。如果你需要了解任何信息，或者只是想聊聊天，我都在呢！")
-    # q.put("恭喜你成为尊贵的蔚来车主！")
+    # q.put("你好呀！我很高兴和你交流~如果你有什么问题，随时告诉我哦。我在这里，准备为你提供帮助！希望能为你的每一天带来一些便利和乐趣。如果你需要了解任何信息，或者只是想聊聊天，我都在呢！")
     q.put("[END]")
     
     tts_thread = threading.Thread(target=tts.start_tts)

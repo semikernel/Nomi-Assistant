@@ -56,6 +56,7 @@ websockets = "==15.0.1"
 yarl = "==1.18.3"
 
 [dev-packages]
+matplotlib = "*"
 
 [requires]
 python_version = "3.12"
