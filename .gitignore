@@ -1,2 +1,5 @@
 .env
 archive/*
+vosk_reco
+stl_files
+snowboy

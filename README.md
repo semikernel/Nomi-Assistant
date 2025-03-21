@@ -1,2 +1,2 @@
-# Nomi-Assistant
-This is an AI voice companion that imitates the Nomi robot in the NIO car.
+# Xiaoling-Assistant
+This is an AI voice accompany robot that inspired by the Nomi robot of the NIO car.
